@@ -14,11 +14,9 @@ jobs:
         conf:
          - msvc
          - gnu
-        include:
-         - conf: msvc
-           toolchain: stable
-         - conf: gnu
-           toolchain: stable-x86_64-pc-windows-gnu
+        arch:
+          - i686
+          - x86_64
 
     runs-on: windows-latest
 
@@ -28,9 +26,8 @@ jobs:
     - name: Install stable
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
-        toolchain: ${{ matrix.toolchain }}
-        override: true
+        toolchain: stable
+        target: ${{ matrix.arch }}-pc-windows-${{ matrix.conf }}
 
     - name: Build cargo-c
       run: |
@@ -43,11 +40,10 @@ jobs:
               "target\release\cargo-cbuild.exe" `
               "target\release\cargo-cinstall.exe"
 
-
     - name: Create zip
       run: |
         cd target/release
-        7z a ../../cargo-c-windows-${{ matrix.conf }}.zip `
+        7z a ../../cargo-c-windows-${{ matrix.conf }}-${{ matrix.arch }}.zip `
              "cargo-capi.exe" `
              "cargo-cbuild.exe" `
              "cargo-cinstall.exe"
@@ -55,50 +51,53 @@ jobs:
     - name: Upload binaries
       uses: actions/upload-artifact@v2
       with:
-        name: cargo-c-windows-${{ matrix.conf }}-binaries
-        path: cargo-c-windows-${{ matrix.conf }}.zip
+        name: cargo-c-windows-binaries
+        path: cargo-c-windows-${{ matrix.conf }}-${{ matrix.arch }}.zip
 
   linux-binaries:
 
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ["i686", "x86_64", "aarch64"]
+
+    env:
+      TARGET: ${{ matrix.arch}}-unknown-linux-musl
+      ARCHIVE: cargo-c-linux-${{ matrix.arch }}.tar.gz
+      STRIP: ${{ matrix.arch }}-linux-gnu-strip
 
     steps:
     - uses: actions/checkout@v2
 
-    - name: Install musl-tools
+    - name: Install cross-compile strip
+      env:
+        ARCH: ${{ matrix.arch }}
       run: |
-        sudo apt-get install musl-tools
+        sudo apt-get install -y binutils-${ARCH/_/-}-linux-gnu
+
+    - name: Install cross
+      run: |
+        curl -sL https://github.com/cross-rs/cross/releases/download/v0.2.4/cross-x86_64-unknown-linux-musl.tar.gz \
+          | tar -zxC /usr/local/bin
 
     - name: Install Rust stable and musl target
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         toolchain: stable
-        target: x86_64-unknown-linux-musl
-        override: true
-
-    - name: Build openssl for musl
-      run: |
-         OPENSSL_BIN=target/x86_64-unknown-linux-musl/release/build
-         git clone --depth 1 https://github.com/sfackler/rust-openssl
-         cd rust-openssl/openssl-sys
-         cargo build --target x86_64-unknown-linux-musl \
-                     --release \
-                     --features=vendored
-         mv ../$OPENSSL_BIN/openssl-sys-*/out/openssl-build/install/* \
-            $GITHUB_WORKSPACE
+        target: ${{ env.TARGET }}
 
     - name: Build cargo-c
       run: |
-        export OPENSSL_LIB_DIR=$GITHUB_WORKSPACE/lib
-        export OPENSSL_INCLUDE_DIR=$GITHUB_WORKSPACE/include
-        cargo build --target x86_64-unknown-linux-musl --release
+        cross build --target $TARGET \
+            --features=cargo/vendored-openssl \
+            --release \
 
     - name: Create zip
       run: |
-        cd target/x86_64-unknown-linux-musl/release
-        strip cargo-capi cargo-cbuild cargo-cinstall
-        tar -czvf $GITHUB_WORKSPACE/cargo-c-linux.tar.gz \
+        cd target/$TARGET/release
+        $STRIP cargo-capi cargo-cbuild cargo-cinstall
+        tar -czvf $GITHUB_WORKSPACE/$ARCHIVE \
                   cargo-capi \
                   cargo-cbuild \
                   cargo-cinstall
@@ -107,11 +106,96 @@ jobs:
       uses: actions/upload-artifact@v2
       with:
         name: cargo-c-linux-binaries
-        path: cargo-c-linux.tar.gz
+        path: ${{ env.ARCHIVE }}
+
+  linux-binaries-test:
+    runs-on: ubuntu-latest
+    needs: linux-binaries
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ["i686", "x86_64", "aarch64"]
+        include:
+          - arch: i686
+            docker_platform: i386
+          - arch: x86_64
+            docker_platform: amd64
+          - arch: aarch64
+            docker_platform: arm64
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Set up QEMU
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v2
+
+      - uses: actions/download-artifact@v2
+        with:
+          name: cargo-c-linux-binaries
+
+      - name: Cache vendored dependencies
+        id: cache-vendor-dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            config.toml
+            example-project/vendor
+          key: example-project-vendor-${{ hashFiles('example-project/Cargo.toml') }}-${{ matrix.arch }}
+          restore-keys: |
+            example-project-vendor-${{ hashFiles('example-project/Cargo.toml') }}-
+            example-project-vendor-
+
+      # Run cargo vendor, because fetching from crates.io in qemu takes too long
+      - name: Run cargo vendor on example project
+        if: steps.cache-vendor-dependencies.outputs.cache-hit != 'true'
+        run: |
+          [ -f config.toml ] && cp config.toml ~/.cargo ||:
+          cargo vendor \
+            --versioned-dirs \
+            --manifest-path example-project/Cargo.toml \
+            ${{ github.workspace }}/example-project/vendor \
+          > config.toml
+
+      - name: Start test container
+        run: |
+          docker run -d --rm --init \
+            --name test \
+            -v${{ github.workspace }}:${{ github.workspace }} \
+            --workdir ${{ github.workspace }}/example-project \
+            --platform linux/${{ matrix.docker_platform }} \
+            rust:buster \
+            tail -f /dev/null
+
+      - name: Copy file into container
+        run: |
+          docker cp - test:/usr/local/cargo/bin < cargo-c-linux-${{ matrix.arch }}.tar.gz
+          docker cp config.toml test:/usr/local/cargo
+
+      - name: Install C API for example project
+        run: |
+          docker exec test cargo cinstall --offline --verbose --release
+          docker exec test ldconfig
+
+      - name: Test usage from C (using Makefile)
+        run: |
+          docker exec \
+            -w ${{ github.workspace }}/example-project/usage-from-c \
+            test make
+          docker exec test usage-from-c/run_tests
 
   macos-binaries:
 
     runs-on: macos-latest
+    strategy:
+      matrix:
+        arch: ["x86_64", "aarch64"]
+    env:
+      TARGET: ${{ matrix.arch }}-apple-darwin
+      ARCHIVE: cargo-c-macos-${{ matrix.arch }}.zip
 
     steps:
     - uses: actions/checkout@v2
@@ -119,19 +203,20 @@ jobs:
     - name: Install stable
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         toolchain: stable
-        override: true
+        target: ${{ env.TARGET }}
 
     - name: Build cargo-c
       run: |
-        cargo build --features=cargo/vendored-openssl --release
+        cargo build --target $TARGET \
+            --features=cargo/vendored-openssl \
+            --release \
 
     - name: Create zip
       run: |
-        cd target/release
+        cd target/$TARGET/release
         strip cargo-capi cargo-cbuild cargo-cinstall
-        zip $GITHUB_WORKSPACE/cargo-c-macos.zip \
+        zip $GITHUB_WORKSPACE/$ARCHIVE \
             cargo-capi \
             cargo-cbuild \
             cargo-cinstall
@@ -140,11 +225,11 @@ jobs:
       uses: actions/upload-artifact@v2
       with:
         name: cargo-c-macos-binaries
-        path: cargo-c-macos.zip
+        path: ${{ env.ARCHIVE }}
 
   deploy:
 
-    needs: [windows-binaries, linux-binaries, macos-binaries]
+    needs: [windows-binaries, linux-binaries-test, macos-binaries]
 
     runs-on: ubuntu-latest
 
@@ -154,9 +239,7 @@ jobs:
     - name: Install stable
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         toolchain: stable
-        override: true
 
     - name: Download zip files
       uses: actions/download-artifact@v2
@@ -170,9 +253,14 @@ jobs:
       with:
         files: |
           Cargo.lock
-          cargo-c-linux-binaries/cargo-c-linux.tar.gz
-          cargo-c-macos-binaries/cargo-c-macos.zip
-          cargo-c-windows-msvc-binaries/cargo-c-windows-msvc.zip
-          cargo-c-windows-gnu-binaries/cargo-c-windows-gnu.zip
+          cargo-c-linux-binaries/cargo-c-linux-x86_64.tar.gz
+          cargo-c-linux-binaries/cargo-c-linux-i686.tar.gz
+          cargo-c-linux-binaries/cargo-c-linux-aarch64.tar.gz
+          cargo-c-macos-binaries/cargo-c-macos-x86_64.zip
+          cargo-c-macos-binaries/cargo-c-macos-aarch64.zip
+          cargo-c-windows-binaries/cargo-c-windows-msvc-i686.zip
+          cargo-c-windows-binaries/cargo-c-windows-msvc-x86_64.zip
+          cargo-c-windows-binaries/cargo-c-windows-gnu-i686.zip
+          cargo-c-windows-binaries/cargo-c-windows-gnu-x86_64.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
