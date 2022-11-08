@@ -56,30 +56,23 @@ jobs:
 
   linux-binaries:
     strategy:
+      fail-fast: false
       matrix:
         target:
+         - i686-unknown-linux-musl
          - x86_64-unknown-linux-musl
          - powerpc64le-unknown-linux-gnu
-         - aarch64-unknown-linux-gnu
-        include:
-         - target: x86_64-unknown-linux-musl
-           sdk: musl-tools
-           cc: cc
-         - target: powerpc64le-unknown-linux-gnu
-           sdk: crossbuild-essential-ppc64el
-           cc: powerpc64le-linux-gnu-gcc
-         - target: aarch64-unknown-linux-gnu
-           sdk: crossbuild-essential-arm64
-           cc: aarch64-linux-gnu-gcc
+         - aarch64-unknown-linux-musl
 
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v2
 
-    - name: Install $${{ matrix.sdk }}
+    - name: Install cross
       run: |
-        sudo apt-get install ${{ matrix.sdk }}
+        curl -sL https://github.com/cross-rs/cross/releases/download/v0.2.4/cross-x86_64-unknown-linux-musl.tar.gz \
+          | tar -zxC /usr/local/bin
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
@@ -89,10 +82,7 @@ jobs:
 
     - name: Build cargo-c
       run: |
-        mkdir .cargo
-        echo -e "[target.${{ matrix.target }}]\nlinker=\"${{ matrix.cc }}\"\n" > .cargo/config
-        echo -e "[profile.release]\nstrip = true" >> .cargo/config
-        cargo build --target ${{ matrix.target }} --release --features vendored-openssl
+        cross build --target ${{ matrix.target }} --features=vendored-openssl --release
 
     - name: Create zip
       run: |
@@ -108,24 +98,26 @@ jobs:
         name: cargo-c-linux-binaries
         path: cargo-c-${{ matrix.target }}.tar.gz
 
-
   linux-binaries-test:
     runs-on: ubuntu-latest
     needs: linux-binaries
     strategy:
       fail-fast: false
       matrix:
-        arch: ["powerpc64le", "x86_64", "aarch64"]
+        target:
+         - i686-unknown-linux-musl
+         - x86_64-unknown-linux-musl
+         - powerpc64le-unknown-linux-gnu
+         - aarch64-unknown-linux-musl
         include:
-          - arch: powerpc64le
-            docker_platform: ppc64le
-            archive: cargo-c-powerpc64le-unknown-linux-gnu.tar.gz
-          - arch: x86_64
-            docker_platform: amd64
-            archive: cargo-c-x86_64-unknown-linux-musl.tar.gz
-          - arch: aarch64
-            docker_platform: arm64
-            archive: cargo-c-aarch64-unknown-linux-gnu.tar.gz
+          - target: i686-unknown-linux-musl
+            platform: i386
+          - target: x86_64-unknown-linux-musl
+            platform: amd64
+          - target: powerpc64le-unknown-linux-gnu
+            platform: ppc64le
+          - target: aarch64-unknown-linux-musl
+            platform: arm64
     steps:
       - uses: actions/checkout@v3
 
@@ -134,8 +126,15 @@ jobs:
           toolchain: stable
 
       - name: Set up QEMU
-        if: matrix.arch != 'x86_64' && matrix.arch != 'i686'
+        if: matrix.platform != 'i386' && matrix.platform != 'amd64'
         uses: docker/setup-qemu-action@v2
+        with:
+          platforms: ${{ matrix.platform }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          platforms: linux/${{ matrix.platform }}
 
       - uses: actions/download-artifact@v2
         with:
@@ -148,7 +147,7 @@ jobs:
           path: |
             config.toml
             example-project/vendor
-          key: example-project-vendor-${{ hashFiles('example-project/Cargo.toml') }}-${{ matrix.arch }}
+          key: example-project-vendor-${{ hashFiles('example-project/Cargo.toml') }}-${{ matrix.target }}
           restore-keys: |
             example-project-vendor-${{ hashFiles('example-project/Cargo.toml') }}-
             example-project-vendor-
@@ -168,9 +167,13 @@ jobs:
       # powerpc image, so we create it locally here. See
       # https://github.com/rust-lang/docker-rust/blob/7680612/1.65.0/buster/Dockerfile
       - name: Create powerpc rust container
-        if: matrix.arch == 'powerpc64le'
+        if: matrix.platform == 'ppc64le'
         run: |
-          docker build -t rust:ppc64le $(mktemp -d) -f - <<'EOF'
+          docker buildx build --load \
+            --platform linux/ppc64le \
+            -t rust:buster \
+            $(mktemp -d) -f - \
+          <<'EOF'
           FROM ppc64le/buildpack-deps:buster
 
           ENV RUSTUP_HOME=/usr/local/rustup \
@@ -199,13 +202,13 @@ jobs:
             --name test \
             -v${{ github.workspace }}:${{ github.workspace }} \
             --workdir ${{ github.workspace }}/example-project \
-            --platform linux/${{ matrix.docker_platform }} \
+            --platform linux/${{ matrix.platform }} \
             rust:buster \
             tail -f /dev/null
 
       - name: Copy file into container
         run: |
-          docker cp - test:/usr/local/cargo/bin < ${{ matrix.archive }}
+          docker cp - test:/usr/local/cargo/bin < cargo-c-${{ matrix.target }}.tar.gz
           docker cp config.toml test:/usr/local/cargo
 
       - name: Install C API for example project
