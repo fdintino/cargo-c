@@ -53,22 +53,23 @@ jobs:
         target:
          - i686-unknown-linux-musl
          - x86_64-unknown-linux-musl
-         - powerpc64le-unknown-linux-gnu
+         - powerpc64le-unknown-linux-musl
          - aarch64-unknown-linux-musl
 
     runs-on: ubuntu-latest
-
+    container: ${{ fromJSON('["", "messense/rust-musl-cross:powerpc64le-musl"]')[matrix.target == 'powerpc64le-unknown-linux-musl'] }}
     steps:
     - uses: actions/checkout@v2
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
+      if: matrix.target != 'powerpc64le-unknown-linux-musl'
       with:
         toolchain: stable
 
     - name: Install cross
       run: |
-        cargo install cross --git https://github.com/cross-rs/cross
+        cargo install cross --target x86_64-unknown-linux-gnu --git https://github.com/cross-rs/cross
 
     - name: Build cargo-c
       run: |
@@ -79,7 +80,7 @@ jobs:
     - name: Create zip
       run: |
         cd target/${{ matrix.target }}/release-strip
-        tar -czvf $GITHUB_WORKSPACE/cargo-c-${{ matrix.target }}.tar.gz \
+        tar -czvf ../../../cargo-c-${{ matrix.target }}.tar.gz \
                   cargo-capi \
                   cargo-cbuild \
                   cargo-cinstall
