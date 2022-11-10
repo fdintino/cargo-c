@@ -96,6 +96,95 @@ jobs:
         name: cargo-c-linux-binaries
         path: cargo-c-${{ matrix.target }}.tar.gz
 
+  linux-binaries-test:
+    runs-on: ubuntu-latest
+    needs: linux-binaries
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+         - i686-unknown-linux-musl
+         - x86_64-unknown-linux-musl
+         - aarch64-unknown-linux-musl
+        include:
+          - target: i686-unknown-linux-musl
+            platform: i386
+          - target: x86_64-unknown-linux-musl
+            platform: amd64
+          - target: aarch64-unknown-linux-musl
+            platform: arm64
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Set up QEMU
+        if: matrix.platform != 'i386' && matrix.platform != 'amd64'
+        uses: docker/setup-qemu-action@v2
+        with:
+          platforms: ${{ matrix.platform }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          platforms: linux/${{ matrix.platform }}
+
+      - uses: actions/download-artifact@v2
+        with:
+          name: cargo-c-linux-binaries
+
+      - name: Cache vendored dependencies
+        id: cache-vendor-dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            config.toml
+            example-project/vendor
+          key: example-project-vendor-${{ hashFiles('example-project/Cargo.toml') }}-${{ matrix.target }}
+          restore-keys: |
+            example-project-vendor-${{ hashFiles('example-project/Cargo.toml') }}-
+            example-project-vendor-
+
+      # Run cargo vendor, because fetching from crates.io in qemu takes too long
+      - name: Run cargo vendor on example project
+        if: steps.cache-vendor-dependencies.outputs.cache-hit != 'true'
+        run: |
+          [ -f config.toml ] && cp config.toml ~/.cargo ||:
+          cargo vendor \
+            --versioned-dirs \
+            --manifest-path example-project/Cargo.toml \
+            ${{ github.workspace }}/example-project/vendor \
+          > config.toml
+
+      - name: Start test container
+        run: |
+          docker run -d --rm --init \
+            --name test \
+            -v${{ github.workspace }}:${{ github.workspace }} \
+            --workdir ${{ github.workspace }}/example-project \
+            --platform linux/${{ matrix.platform }} \
+            rust:buster \
+            tail -f /dev/null
+
+      - name: Copy file into container
+        run: |
+          docker cp - test:/usr/local/cargo/bin < cargo-c-${{ matrix.target }}.tar.gz
+          docker cp config.toml test:/usr/local/cargo
+
+      - name: Install C API for example project
+        run: |
+          docker exec test cargo cinstall --offline --verbose --release
+          docker exec test ldconfig
+
+      - name: Test usage from C (using Makefile)
+        run: |
+          docker exec \
+            -w ${{ github.workspace }}/example-project/usage-from-c \
+            test make
+          docker exec test usage-from-c/run_tests
+
   macos-binaries:
 
     runs-on: macos-latest
@@ -129,7 +218,7 @@ jobs:
 
   deploy:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [windows-binaries, linux-binaries, macos-binaries]
+    needs: [windows-binaries, linux-binaries, linux-binaries-test, macos-binaries]
 
     runs-on: ubuntu-latest
 
