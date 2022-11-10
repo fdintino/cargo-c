@@ -106,6 +106,8 @@ jobs:
             platform: i386
           - target: x86_64-unknown-linux-musl
             platform: amd64
+          - target: powerpc64le-unknown-linux-musl
+            platform: ppc64le
           - target: aarch64-unknown-linux-musl
             platform: arm64
     steps:
@@ -152,6 +154,39 @@ jobs:
             --manifest-path example-project/Cargo.toml \
             ${{ github.workspace }}/example-project/vendor \
           > config.toml
+
+      # The official rust manifest published to docker hub does not include a
+      # powerpc image, so we create it locally here. See
+      # https://github.com/rust-lang/docker-rust/blob/7680612/1.65.0/buster/Dockerfile
+      - name: Create powerpc rust container
+        if: matrix.platform == 'ppc64le'
+        run: |
+          docker buildx build --load \
+            --platform linux/ppc64le \
+            -t rust:buster \
+            $(mktemp -d) -f - \
+          <<'EOF'
+          FROM ppc64le/buildpack-deps:buster
+
+          ENV RUSTUP_HOME=/usr/local/rustup \
+              CARGO_HOME=/usr/local/cargo \
+              PATH=/usr/local/cargo/bin:$PATH \
+              RUST_VERSION=1.65.0
+
+          RUN set -eux; \
+              rustArch='powerpc64le-unknown-linux-gnu'; \
+              rustupSha256='774f62fd927f6c29499a6caee8f534e796161321ec35435788971629bb55af8e'; \
+              url="https://static.rust-lang.org/rustup/archive/1.25.1/${rustArch}/rustup-init"; \
+              wget "$url"; \
+              echo "${rustupSha256} *rustup-init" | sha256sum -c -; \
+              chmod +x rustup-init; \
+              ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${rustArch}; \
+              rm rustup-init; \
+              chmod -R a+w $RUSTUP_HOME $CARGO_HOME; \
+              rustup --version; \
+              cargo --version; \
+              rustc --version;
+          EOF
 
       - name: Start test container
         run: |
