@@ -15,11 +15,18 @@ jobs:
         conf:
          - msvc
          - gnu
+        arch:
+         - aarch64
+         - x86_64
         include:
          - conf: msvc
-           toolchain: stable
+           abi: msvc
          - conf: gnu
-           toolchain: stable-x86_64-pc-windows-gnu
+           arch: x86_64
+           abi: gnu
+         - conf: gnu
+           arch: aarch64
+           abi: gnullvm
 
     runs-on: windows-latest
 
@@ -29,7 +36,7 @@ jobs:
     - name: Install stable
       uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: ${{ matrix.toolchain }}
+        target: ${{ matrix.arch }}-pc-windows-${{ matrix.abi }}
 
     - name: Build cargo-c
       run: |
@@ -38,7 +45,7 @@ jobs:
     - name: Create zip
       run: |
         cd target/release-strip
-        7z a ../../cargo-c-windows-${{ matrix.conf }}.zip `
+        7z a ../../cargo-c-windows-${{ matrix.arch }}-${{ matrix.conf }}.zip `
              "cargo-capi.exe" `
              "cargo-cbuild.exe" `
              "cargo-cinstall.exe" `
@@ -47,8 +54,8 @@ jobs:
     - name: Upload binaries
       uses: actions/upload-artifact@v4
       with:
-        name: cargo-c-windows-${{ matrix.conf }}-binaries
-        path: cargo-c-windows-${{ matrix.conf }}.zip
+        name: cargo-c-windows-${{ matrix.arch }}-${{ matrix.conf }}-binaries
+        path: cargo-c-windows-${{ matrix.arch }}-${{ matrix.conf }}.zip
 
   linux-binaries:
     strategy:
@@ -154,7 +161,9 @@ jobs:
           Cargo.lock
           cargo-c-linux-binaries*/*.tar.gz
           cargo-c-macos-binaries/cargo-c-macos.zip
-          cargo-c-windows-msvc-binaries/cargo-c-windows-msvc.zip
-          cargo-c-windows-gnu-binaries/cargo-c-windows-gnu.zip
+          cargo-c-windows-x86_64-msvc-binaries/cargo-c-windows-x86_64-msvc.zip
+          cargo-c-windows-x86_64-gnu-binaries/cargo-c-windows-x86_64-gnu.zip
+          cargo-c-windows-aarch64-msvc-binaries/cargo-c-windows-aarch64-msvc.zip
+          cargo-c-windows-aarch64-gnu-binaries/cargo-c-windows-aarch64-gnu.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
